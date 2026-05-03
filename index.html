@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Route</title>
+
+    <!-- PWA -->
+    <link rel="manifest" href="./manifest.json">
+    <meta name="theme-color" content="#4a7c3f">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="My Route">
+    <link rel="apple-touch-icon" href="./icons/icon-192.png">
+
+    <style>
+        /* Base Layout */
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; flex-direction: row; background: #f0f2f5; }
+        #sidebar { width: 400px; padding: 20px; background: white; box-shadow: 2px 0 12px rgba(0,0,0,0.15); overflow-y: auto; z-index: 10; }
+        #map { flex-grow: 1; height: 100%; }
+
+        /* Mobile Adaptations */
+        @media (max-width: 768px) {
+            body { flex-direction: column; }
+            #sidebar { width: 100%; height: 50vh; order: 2; padding: 15px; box-sizing: border-box; }
+            #map { width: 100%; height: 50vh; order: 1; }
+            input[type="text"], button { font-size: 16px; padding: 12px; }
+        }
+
+        .card { background: #fff; border: 1px solid #dfe1e5; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
+        h2 { margin: 0 0 15px 0; color: #4a7c3f; }
+        label { display: block; font-weight: 600; margin-bottom: 8px; color: #444; font-size: 0.9rem; }
+        input[type="text"] { width: 92%; padding: 10px; margin-bottom: 10px; border: 1px solid #dadce0; border-radius: 4px; }
+        button { padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; width: 100%; margin-bottom: 8px; }
+
+        /* Button Styles */
+        .btn-new { background: #e8f5e9; color: #4a7c3f; border: 1px solid #4a7c3f; }
+        .btn-add { background: #fbbc04; color: #202124; }
+        .btn-optimize { background: #4a7c3f; color: white; font-size: 1rem; height: 50px; }
+        .btn-gps { background: #4285F4; color: white; margin-top: 10px; display: block; text-decoration: none; text-align: center; line-height: 50px; height: 50px; border-radius: 4px; font-weight: bold; }
+        .btn-secondary { background: #f1f3f4; color: #3c4043; border: 1px solid #dadce0; font-size: 0.8rem; }
+
+        #counter-box { font-size: 0.8rem; color: #666; margin-bottom: 10px; text-align: right; font-weight: bold; }
+        #directions-panel { margin-top: 15px; border-top: 2px solid #eee; padding-top: 10px; font-size: 0.85rem; }
+        .waypoint-item { display: flex; gap: 5px; margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>My Route</h2>
+
+    <div class="card">
+        <label>📂 Load/Export Data</label>
+        <select id="saved-lists" onchange="loadList()" style="width: 100%; padding: 10px; border-radius: 4px; margin-bottom: 10px;">
+            <option value="">-- Choose a Route --</option>
+        </select>
+        <div style="display: flex; gap: 5px;">
+            <button class="btn-secondary" onclick="exportData()">📤 Export</button>
+            <button class="btn-secondary" onclick="document.getElementById('importFile').click()">📥 Import</button>
+            <input type="file" id="importFile" style="display:none" onchange="importData(event)">
+        </div>
+    </div>
+
+    <div class="card">
+        <button class="btn-new" onclick="createNewRoute()">✨ Start New</button>
+        <hr style="border:0; border-top:1px solid #eee; margin: 15px 0;">
+
+        <label>Start Location</label>
+        <input type="text" id="start" placeholder="Starting point">
+        <div id="waypoints"></div>
+        <div id="counter-box">Stops: <span id="stop-count">0</span> / 23</div>
+        <button class="btn-add" id="add-btn" onclick="addWaypoint()">+ Add Stop</button>
+
+        <label>Final Destination</label>
+        <input type="text" id="end" placeholder="Final destination">
+
+        <button class="btn-optimize" onclick="calculateRoute()">Optimize & Map</button>
+        <button class="btn-save" style="background:#34a853; color:white;" onclick="saveList()">Save Route</button>
+    </div>
+
+    <div id="results"></div>
+    <div id="directions-panel"></div>
+</div>
+
+<div id="map"></div>
+
+<script async src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDKd9rHPRMog1UC2PHfrmylC72qOWjo_eQ&libraries=places&loading=async&callback=initMap"></script>
+
+<script>
+    let map, directionsService, directionsRenderer, userMarker;
+    let currentWaypoints = 0;
+
+    // Register service worker
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('./sw.js')
+                .then(reg => console.log('SW registered:', reg.scope))
+                .catch(err => console.log('SW failed:', err));
+        });
+    }
+
+    function initMap() {
+        map = new google.maps.Map(document.getElementById('map'), {
+            zoom: 5, center: { lat: -25.27, lng: 133.77 },
+            gestureHandling: 'greedy'
+        });
+        directionsService = new google.maps.DirectionsService();
+        directionsRenderer = new google.maps.DirectionsRenderer({
+            map: map, panel: document.getElementById('directions-panel')
+        });
+
+        setupAutocomplete('start');
+        setupAutocomplete('end');
+        updateDropdown();
+        startTracking();
+    }
+
+    function updateStopCounter() {
+        currentWaypoints = document.querySelectorAll('.waypoint-item').length;
+        document.getElementById('stop-count').textContent = currentWaypoints;
+        const addBtn = document.getElementById('add-btn');
+        if (currentWaypoints >= 23) {
+            addBtn.disabled = true; addBtn.style.background = "#ccc";
+        } else {
+            addBtn.disabled = false; addBtn.style.background = "#fbbc04";
+        }
+    }
+
+    function startTracking() {
+        if (navigator.geolocation) {
+            navigator.geolocation.watchPosition((pos) => {
+                const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                if (!userMarker) {
+                    userMarker = new google.maps.Marker({
+                        position: loc, map: map,
+                        icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#4285F4', fillOpacity: 1, strokeWeight: 2, strokeColor: 'white' }
+                    });
+                } else { userMarker.setPosition(loc); }
+            }, null, { enableHighAccuracy: true });
+        }
+    }
+
+    function setupAutocomplete(id) {
+        const input = document.getElementById(id);
+        if (input) new google.maps.places.Autocomplete(input);
+    }
+
+    function addWaypoint(val = "") {
+        if (document.querySelectorAll('.waypoint-item').length >= 23) return;
+        const container = document.getElementById('waypoints');
+        const div = document.createElement('div');
+        const id = Date.now();
+        div.className = 'waypoint-item';
+        div.id = `group-${id}`;
+        div.innerHTML = `<input type="text" id="wp-${id}" value="${val}" placeholder="Stop address">
+                         <button onclick="this.parentElement.remove(); updateStopCounter();" style="width:45px; background:none; border:none; color:#d93025; font-size:20px;">✕</button>`;
+        container.appendChild(div);
+        setupAutocomplete(`wp-${id}`);
+        updateStopCounter();
+    }
+
+    function calculateRoute() {
+        const start = document.getElementById('start').value;
+        const end = document.getElementById('end').value;
+        const wpsElements = Array.from(document.querySelectorAll('#waypoints input')).filter(i => i.value);
+        const wps = wpsElements.map(i => ({ location: i.value, stopover: true }));
+
+        if(!start || !end) return alert("Please enter start and end locations.");
+
+        directionsService.route({
+            origin: start, destination: end, waypoints: wps,
+            optimizeWaypoints: true, travelMode: 'DRIVING'
+        }, (res, status) => {
+            if (status === 'OK') {
+                directionsRenderer.setDirections(res);
+
+                const optimizedOrder = res.routes[0].waypoint_order;
+                const optimizedWaypoints = optimizedOrder.map(index => wpsElements[index].value);
+
+                const resultsDiv = document.getElementById('results');
+                resultsDiv.innerHTML = '<h3 style="margin-top:20px; font-size:1rem; color:#444;">Navigation Links</h3>';
+
+                const allStops = [start, ...optimizedWaypoints, end];
+                const MAX_STOPS_PER_LINK = 10;
+                let chunkIndex = 1;
+
+                for (let i = 0; i < allStops.length - 1; i += (MAX_STOPS_PER_LINK - 1)) {
+                    const chunk = allStops.slice(i, i + MAX_STOPS_PER_LINK);
+                    const chunkStart = chunk[0];
+                    const chunkEnd = chunk[chunk.length - 1];
+                    const chunkWaypoints = chunk.slice(1, -1);
+                    const wpQuery = chunkWaypoints.map(w => encodeURIComponent(w)).join('%7C');
+
+                    let gpsUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(chunkStart)}&destination=${encodeURIComponent(chunkEnd)}&travelmode=driving`;
+                    if (chunkWaypoints.length > 0) {
+                        gpsUrl += `&waypoints=${wpQuery}`;
+                    }
+
+                    const btn = document.createElement('a');
+                    btn.className = 'btn-gps';
+                    btn.style.marginBottom = '10px';
+                    btn.target = '_blank';
+                    btn.href = gpsUrl;
+                    btn.textContent = `🚀 Navigate Part ${chunkIndex} (Stops ${i + 1} to ${i + chunk.length})`;
+                    resultsDiv.appendChild(btn);
+                    chunkIndex++;
+                }
+
+                if(window.innerWidth < 768) {
+                    resultsDiv.scrollIntoView({behavior: 'smooth'});
+                }
+            } else { alert("Directions Error: " + status); }
+        });
+    }
+
+    function createNewRoute() {
+        if (confirm("Clear current route?")) {
+            document.getElementById('start').value = "";
+            document.getElementById('end').value = "";
+            document.getElementById('waypoints').innerHTML = "";
+            document.getElementById('results').innerHTML = "";
+            document.getElementById('directions-panel').innerHTML = "";
+            directionsRenderer.setDirections({routes: []});
+            updateStopCounter();
+        }
+    }
+
+    function saveList() {
+        const name = prompt("Name this route:");
+        if (!name) return;
+        const data = { start: document.getElementById('start').value, end: document.getElementById('end').value, wps: Array.from(document.querySelectorAll('#waypoints input')).map(i => i.value) };
+        const storage = JSON.parse(localStorage.getItem('myRoutes') || '{}');
+        storage[name] = data;
+        localStorage.setItem('myRoutes', JSON.stringify(storage));
+        updateDropdown();
+    }
+
+    function updateDropdown() {
+        const select = document.getElementById('saved-lists');
+        const storage = JSON.parse(localStorage.getItem('myRoutes') || '{}');
+        select.innerHTML = '<option value="">-- Choose a Route --</option>';
+        Object.keys(storage).forEach(name => {
+            const op = document.createElement('option');
+            op.value = name; op.textContent = name;
+            select.appendChild(op);
+        });
+    }
+
+    function loadList() {
+        const name = document.getElementById('saved-lists').value;
+        if (!name) return;
+        const data = JSON.parse(localStorage.getItem('myRoutes'))[name];
+        document.getElementById('start').value = data.start;
+        document.getElementById('end').value = data.end;
+        document.getElementById('waypoints').innerHTML = "";
+        data.wps.forEach(val => addWaypoint(val));
+        calculateRoute();
+    }
+
+    function exportData() {
+        const data = localStorage.getItem('myRoutes');
+        if (!data || data === '{}') return alert("No data.");
+        const blob = new Blob([data], { type: 'application/json' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = "routes_backup.json";
+        link.click();
+    }
+
+    function importData(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const current = JSON.parse(localStorage.getItem('myRoutes') || '{}');
+                localStorage.setItem('myRoutes', JSON.stringify({...current, ...JSON.parse(e.target.result)}));
+                updateDropdown();
+                alert("Imported!");
+            } catch(e) { alert("Invalid file format."); }
+        };
+        reader.readAsText(file);
+    }
+</script>
+</body>
+</html>
